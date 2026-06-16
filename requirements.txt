@@ -1,0 +1,9 @@
+python-dotenv
+requests
+cloudscraper
+playwright
+trafilatura
+pymupdf4llm
+langchain-ollama
+langchain-openai
+langchain-core
