@@ -354,3 +354,7 @@ pyrightconfig.json
 model_cache/
 .model_cache/
 teste.py
+references/*
+answers/*
+documents/*
+register/*

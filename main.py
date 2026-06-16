@@ -13,7 +13,7 @@ from src.services.reference_extractor import ReferenceExtractor
 load_dotenv()
 
 llm_base_url = os.getenv("LLM_BASE_URL", "http://localhost:1234/v1/")
-llm_model = os.getenv("LLM_MODEL", "google/gemma-4-e4b")
+llm_model = os.getenv("LLM_MODEL", "openai/gpt-oss-20b")
 
 DOCUMENTS_DIR = Path("./documents")
 DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)

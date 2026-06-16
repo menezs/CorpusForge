@@ -1,4 +1,4 @@
-# Download Reference
+# CorpusForge
 
 Ferramenta para download e conversão de referências bibliográficas extraídas de respostas de LLMs.
 
@@ -13,8 +13,8 @@ O script extrai URLs de um arquivo markdown de resposta, baixa o conteúdo de ca
 
 ```bash
 # Clonar o repositório
-git clone <url-do-repositorio>
-cd download_reference
+git clone https://github.com/menezs/CorpusForge.git
+cd CorpusForge
 
 # Criar ambiente virtual
 python -m venv .venv
@@ -59,17 +59,17 @@ python main.py --register ./register/meu_registro.json answers/meu_arquivo.md
 ## Estrutura do Projeto
 
 ```
-download_reference/
-├── main.py                    # Ponto de entrada
+CorpusForge/
+├── main.py                         # Ponto de entrada
 ├── src/
 │   └── services/
-│       ├── file_converter.py  # Download e conversão de URLs
-│       ├── llm_service.py     # Serviço de LLM (OpenAI/Ollama)
+│       ├── file_converter.py       # Download e conversão de URLs
+│       ├── llm_service.py          # Serviço de LLM (OpenAI/Ollama)
 │       └── reference_extractor.py  # Extração de referências via LLM
-├── answers/                   # Arquivos de resposta (entrada)
-├── documents/                 # Documentos baixados (saída)
-├── references/                # Referências extraídas JSON
-└── register/                  # Registro de processamento
+├── answers/                        # Arquivos de resposta (entrada)
+├── documents/                      # Documentos baixados (saída)
+├── references/                     # Referências extraídas JSON
+└── register/                       # Registro de processamento
 ```
 
 ## Formato dos Arquivos
