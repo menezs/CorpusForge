@@ -39,9 +39,18 @@ class FileConverter:
                     content_type = r.headers.get("content-type", "")
                     if r.status_code == 404:
                         raise ValueError(f"Página não encontrada (404): {url}")
+                    if r.status_code == 403:
+                        print(f"    403 com cloudscraper, tentando Playwright...")
+                        playwright_content = self._playwright_extract(url)
+                        if playwright_content is not None:
+                            return playwright_content, "text/html"
+                        raise ValueError(f"Acesso negado (403) por todas as tentativas: {url}")
                     r.raise_for_status()
                 elif r.status_code == 429:
-                    raise requests.exceptions.HTTPError(response=r)
+                    retry_after = int(r.headers.get("Retry-After", 60))
+                    print(f"    Rate limit (429), aguardando {retry_after}s...")
+                    time.sleep(retry_after)
+                    continue
                 else:
                     r.raise_for_status()
 

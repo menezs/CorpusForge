@@ -114,9 +114,19 @@ def download_errors_only(answer_path: Path, existing_entry: dict) -> dict:
 
     documents = list(existing_entry.get("documents", []))
     new_errors = []
+    skipped_errors = []
+    retryable_keywords = ["429", "Timeout", "ConnectionError", "403", "Forbidden", "rate limit"]
 
     for url, error_info in failed_urls.items():
         doc_id = error_info.get("reference_id", 0)
+        error_msg = error_info.get("error_message", "")
+
+        is_retryable = any(keyword.lower() in error_msg.lower() for keyword in retryable_keywords)
+        if not is_retryable:
+            print(f"  Erro permanente (sem retry): {url}")
+            skipped_errors.append(error_info)
+            continue
+
         safe_name = Path(answer_path).stem.replace(" ", "_")
         output_path = DOCUMENTS_DIR / f"{safe_name}_doc_{doc_id}.md"
 
@@ -135,14 +145,16 @@ def download_errors_only(answer_path: Path, existing_entry: dict) -> dict:
                 "reference_id": doc_id
             })
 
-    recovered = len(failed_urls) - len(new_errors)
+    recovered = len(failed_urls) - len(new_errors) - len(skipped_errors)
     if recovered:
         print(f"  {recovered} de {len(failed_urls)} erros recuperados")
+    if skipped_errors:
+        print(f"  {len(skipped_errors)} erros permanentes ignorados")
 
     return {
         "answer": str(answer_path),
         "documents": documents,
-        "errors": new_errors
+        "errors": new_errors + skipped_errors
     }
 
 def main() -> None:
