@@ -155,7 +155,11 @@ def download_errors_only(answer_path: Path, existing_entry: dict, max_workers: i
 
     logger.info("Reprocessando %d erros anteriores: %s", len(failed_urls), answer_path)
 
-    retryable_keywords = ["429", "Timeout", "ConnectionError", "403", "Forbidden", "rate limit"]
+    retryable_keywords = [
+        "429", "Timeout", "timed out", "ConnectionError", "ReadTimeout",
+        "403", "Forbidden", "rate limit",
+        "SSLError", "SSL", "CERTIFICATE_VERIFY_FAILED", "certificate",
+    ]
     safe_name = Path(answer_path).stem.replace(" ", "_")
 
     def retry_one(url, error_info):

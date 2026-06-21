@@ -3,6 +3,7 @@ import time
 import tempfile
 from urllib.parse import urlparse
 
+import urllib3
 import trafilatura
 import requests
 import cloudscraper
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Optional, Union, Tuple
 
 import pymupdf4llm
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +45,22 @@ class FileConverter:
         last_exc = None
         for attempt in range(retries + 1):
             try:
-                r = requests.get(
-                    url,
-                    headers=_BROWSER_HEADERS,
-                    timeout=30,
-                    allow_redirects=True,
-                )
+                try:
+                    r = requests.get(
+                        url,
+                        headers=_BROWSER_HEADERS,
+                        timeout=(10, 60),
+                        allow_redirects=True,
+                    )
+                except requests.exceptions.SSLError:
+                    logger.warning("SSL inválido para %s, retry com verify=False", url)
+                    r = requests.get(
+                        url,
+                        headers=_BROWSER_HEADERS,
+                        timeout=(10, 60),
+                        allow_redirects=True,
+                        verify=False,
+                    )
                 content_type = r.headers.get("content-type", "")
                 if r.status_code == 404:
                     raise ValueError(f"Página não encontrada (404): {url}")
@@ -190,10 +203,45 @@ class FileConverter:
 
         return str(output_file)
 
-    def _download_pdf(self, url: str, output_path: Union[str, Path]):
-        r = requests.get(url, headers=_BROWSER_HEADERS, stream=True, timeout=30)
-        r.raise_for_status()
-        with open(output_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
+    def _download_pdf(self, url: str, output_path: Union[str, Path], retries: int = 2, backoff: float = 2.0):
+        """Baixa PDF com retry, timeout adaptativo e fallback Playwright."""
+        timeout = (10, 120)  # (connect_timeout, read_timeout)
+        last_exc = None
+
+        for attempt in range(retries + 1):
+            try:
+                try:
+                    r = requests.get(url, headers=_BROWSER_HEADERS, stream=True, timeout=timeout)
+                except requests.exceptions.SSLError:
+                    logger.warning("SSL inválido para %s, retry com verify=False", url)
+                    r = requests.get(url, headers=_BROWSER_HEADERS, stream=True, timeout=timeout, verify=False)
+                r.raise_for_status()
+                with open(output_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                return
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_exc = e
+                if attempt < retries:
+                    wait = backoff * (2 ** attempt)
+                    logger.warning("PDF download falhou (tentativa %d), retry em %.1fs: %s", attempt + 1, wait, e)
+                    time.sleep(wait)
+
+        logger.warning("requests falhou para PDF, tentando Playwright: %s", url)
+        self._download_pdf_playwright(url, output_path)
+
+    def _download_pdf_playwright(self, url: str, output_path: Union[str, Path]):
+        """Fallback: baixa PDF via Playwright."""
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(accept_downloads=True)
+            page = context.new_page()
+            page.set_extra_http_headers(_BROWSER_HEADERS)
+            with page.expect_download(timeout=120000) as download_info:
+                page.goto(url, timeout=60000)
+            download = download_info.value
+            download.save_as(str(output_path))
+            browser.close()
