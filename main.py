@@ -1,16 +1,24 @@
 #!/usr/bin/env python
+import concurrent.futures
+import json
+import logging
 import os
 import sys
-import json
+import threading
 import argparse
 from pathlib import Path
 from dotenv import load_dotenv
+from tqdm import tqdm
 
+from src.logging_config import setup_logging, tqdm_logging
 from src.services.file_converter import FileConverter
 from src.services.llm_service import LLMService
 from src.services.reference_extractor import ReferenceExtractor
 
+logger = logging.getLogger(__name__)
+
 load_dotenv()
+setup_logging()
 
 llm_base_url = os.getenv("LLM_BASE_URL", "http://localhost:1234/v1/")
 llm_model = os.getenv("LLM_MODEL", "openai/gpt-oss-20b")
@@ -19,6 +27,8 @@ DOCUMENTS_DIR = Path("./documents")
 DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 REGISTER_FILE = Path(os.getenv("REGISTER_FILE", "./register/register.json"))
+register_lock = threading.Lock()
+
 
 def load_register() -> list:
     if REGISTER_FILE.exists():
@@ -26,24 +36,35 @@ def load_register() -> list:
             return json.load(f)
     return []
 
-def save_register(register: list):
-    with open(REGISTER_FILE, "w", encoding="utf-8") as f:
-        json.dump(register, f, ensure_ascii=False, indent=2)
 
-def download_references(answer_path: Path, existing_entry: dict = None) -> dict:
-    llm = LLMService(
+def save_register(register: list):
+    tmp_path = REGISTER_FILE.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(register, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, REGISTER_FILE)
+
+
+def create_llm_service() -> LLMService:
+    return LLMService(
         api_key="",
         model=llm_model,
         provider="openai",
-        base_url=llm_base_url
+        base_url=llm_base_url,
     )
 
+
+def download_references(
+    answer_path: Path,
+    llm: LLMService,
+    existing_entry: dict = None,
+    max_workers: int = 4,
+) -> dict:
     extractor = ReferenceExtractor(llm_service=llm)
     converter = FileConverter()
 
-    print(f"\nProcessando: {answer_path}")
+    logger.info("Processando: %s", answer_path)
 
-    result_path = extractor.extract_from_markdown(str(answer_path))
+    result_path = extractor.extract_references(str(answer_path))
     with open(result_path, "r", encoding="utf-8") as f:
         result_json = json.load(f)
 
@@ -57,8 +78,28 @@ def download_references(answer_path: Path, existing_entry: dict = None) -> dict:
         already_downloaded = {Path(d).name for d in existing_documents}
         already_errored_urls = {e["url"] for e in existing_entry.get("errors", [])}
 
-    documents = list(existing_documents)
-    errors = []
+    safe_name = answer_path.stem.replace(" ", "_")
+
+    def download_one(ref):
+        url = ref.get("url")
+        doc_id = ref.get("id", 0)
+        output_path = DOCUMENTS_DIR / f"{safe_name}_doc_{doc_id}.md"
+        try:
+            logger.info("Baixando: %s", url)
+            converter.convert(url=url, output_path=output_path)
+            return ("ok", str(output_path))
+        except Exception as e:
+            error_type = type(e).__name__
+            error_msg = str(e)
+            logger.error("ERRO: %s - %s", error_type, error_msg)
+            return ("error", {
+                "url": url,
+                "error_type": error_type,
+                "error_message": error_msg,
+                "reference_id": doc_id,
+            })
+
+    refs_to_download = []
     skipped = 0
 
     for ref in references:
@@ -67,7 +108,6 @@ def download_references(answer_path: Path, existing_entry: dict = None) -> dict:
             continue
 
         doc_id = ref.get("id", 0)
-        safe_name = answer_path.stem.replace(" ", "_")
         output_path = DOCUMENTS_DIR / f"{safe_name}_doc_{doc_id}.md"
 
         if output_path.name in already_downloaded:
@@ -78,98 +118,122 @@ def download_references(answer_path: Path, existing_entry: dict = None) -> dict:
             skipped += 1
             continue
 
-        print(f"  Baixando: {url}")
-        try:
-            converter.convert(url=url, output_path=output_path)
-            documents.append(str(output_path))
-        except Exception as e:
-            error_type = type(e).__name__
-            error_msg = str(e)
-            print(f"    ERRO: {error_type} - {error_msg}")
-            errors.append({
-                "url": url,
-                "error_type": error_type,
-                "error_message": error_msg,
-                "reference_id": doc_id
-            })
+        refs_to_download.append(ref)
+
+    documents = list(existing_documents)
+    errors = []
+
+    with tqdm_logging():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(download_one, ref): ref for ref in refs_to_download}
+            with tqdm(total=len(futures), desc="Baixando referências", unit="ref") as pbar:
+                for future in concurrent.futures.as_completed(futures):
+                    status, result = future.result()
+                    if status == "ok":
+                        documents.append(result)
+                    else:
+                        errors.append(result)
+                    pbar.update(1)
 
     if skipped:
-        print(f"  {skipped} referências já processadas, ignoradas")
+        logger.info("%d referências já processadas, ignoradas", skipped)
 
     return {
         "answer": str(answer_path),
         "documents": documents,
-        "errors": errors
+        "errors": errors,
     }
 
-def download_errors_only(answer_path: Path, existing_entry: dict) -> dict:
+
+def download_errors_only(answer_path: Path, existing_entry: dict, max_workers: int = 4) -> dict:
     converter = FileConverter()
 
     failed_urls = {e["url"]: e for e in existing_entry.get("errors", [])}
     if not failed_urls:
-        print(f"  Nenhum erro anterior para reprocessar: {answer_path}")
+        logger.info("Nenhum erro anterior para reprocessar: %s", answer_path)
         return existing_entry
 
-    print(f"\nReprocessando {len(failed_urls)} erros anteriores: {answer_path}")
+    logger.info("Reprocessando %d erros anteriores: %s", len(failed_urls), answer_path)
 
-    documents = list(existing_entry.get("documents", []))
-    new_errors = []
-    skipped_errors = []
     retryable_keywords = ["429", "Timeout", "ConnectionError", "403", "Forbidden", "rate limit"]
+    safe_name = Path(answer_path).stem.replace(" ", "_")
 
-    for url, error_info in failed_urls.items():
+    def retry_one(url, error_info):
         doc_id = error_info.get("reference_id", 0)
         error_msg = error_info.get("error_message", "")
 
         is_retryable = any(keyword.lower() in error_msg.lower() for keyword in retryable_keywords)
         if not is_retryable:
-            print(f"  Erro permanente (sem retry): {url}")
-            skipped_errors.append(error_info)
-            continue
+            return ("skip", error_info)
 
-        safe_name = Path(answer_path).stem.replace(" ", "_")
         output_path = DOCUMENTS_DIR / f"{safe_name}_doc_{doc_id}.md"
 
-        print(f"  Retry: {url}")
+        logger.info("Retry: %s", url)
         try:
             converter.convert(url=url, output_path=output_path)
-            documents.append(str(output_path))
+            return ("ok", str(output_path))
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)
-            print(f"    ERRO: {error_type} - {error_msg}")
-            new_errors.append({
+            logger.error("ERRO: %s - %s", error_type, error_msg)
+            return ("error", {
                 "url": url,
                 "error_type": error_type,
                 "error_message": error_msg,
-                "reference_id": doc_id
+                "reference_id": doc_id,
             })
+
+    documents = list(existing_entry.get("documents", []))
+    new_errors = []
+    skipped_errors = []
+
+    with tqdm_logging():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(retry_one, url, error_info): url
+                for url, error_info in failed_urls.items()
+            }
+            with tqdm(total=len(futures), desc="Reprocessando erros", unit="ref") as pbar:
+                for future in concurrent.futures.as_completed(futures):
+                    status, result = future.result()
+                    if status == "ok":
+                        documents.append(result)
+                    elif status == "skip":
+                        skipped_errors.append(result)
+                    else:
+                        new_errors.append(result)
+                    pbar.update(1)
 
     recovered = len(failed_urls) - len(new_errors) - len(skipped_errors)
     if recovered:
-        print(f"  {recovered} de {len(failed_urls)} erros recuperados")
+        logger.info("%d de %d erros recuperados", recovered, len(failed_urls))
     if skipped_errors:
-        print(f"  {len(skipped_errors)} erros permanentes ignorados")
+        logger.info("%d erros permanentes ignorados", len(skipped_errors))
 
     return {
         "answer": str(answer_path),
         "documents": documents,
-        "errors": new_errors + skipped_errors
+        "errors": new_errors + skipped_errors,
     }
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download e conversão de referências")
     parser.add_argument(
         "answer_files", nargs="*",
-        help="Caminhos dos arquivos de resposta para processar"
+        help="Arquivos de resposta para processar (md, pdf, docx)",
     )
     parser.add_argument(
         "--retry-errors", action="store_true",
-        help="Apenas reprocessar URLs que falharam anteriormente"
+        help="Apenas reprocessar URLs que falharam anteriormente",
     )
     parser.add_argument(
         "--register", type=str, default=None,
-        help="Caminho do arquivo de registro (padrão: ./register/register.json)"
+        help="Caminho do arquivo de registro (padrão: ./register/register.json)",
+    )
+    parser.add_argument(
+        "--max-workers", type=int, default=4,
+        help="Número máximo de downloads paralelos (padrão: 4)",
     )
     args = parser.parse_args()
 
@@ -179,11 +243,12 @@ def main() -> None:
 
     answer_files = args.answer_files
     if not answer_files:
-        print("Nenhum arquivo de resposta informado.")
-        print("Uso: python main.py <arquivo1.md> [arquivo2.md ...]")
-        print("     python main.py --retry-errors <arquivo1.md>")
+        logger.error("Nenhum arquivo de resposta informado.")
+        logger.info("Uso: python main.py <arquivo.md|pdf|docx> [arquivo2.md ...]")
+        logger.info("     python main.py --retry-errors <arquivo.md>")
         sys.exit(1)
 
+    llm = create_llm_service()
     register = load_register()
     register_map = {entry["answer"]: entry for entry in register}
     skipped_answers = []
@@ -193,27 +258,32 @@ def main() -> None:
 
         if args.retry_errors:
             if not existing_entry:
-                print(f">>> Sem registro anterior, ignorando: {answer_path}")
+                logger.warning("Sem registro anterior, ignorando: %s", answer_path)
                 continue
-            entry = download_errors_only(Path(answer_path), existing_entry)
+            entry = download_errors_only(
+                Path(answer_path), existing_entry, max_workers=args.max_workers,
+            )
         else:
-            print(f">>> Fazendo download das referências: {answer_path}")
-            entry = download_references(Path(answer_path), existing_entry)
+            logger.info("Fazendo download das referências: %s", answer_path)
+            entry = download_references(
+                Path(answer_path), llm, existing_entry, max_workers=args.max_workers,
+            )
 
         if entry["documents"]:
-            if existing_entry:
-                register.remove(existing_entry)
-            register.append(entry)
-            register_map[str(answer_path)] = entry
-            save_register(register)
-            print(f"  {len(entry['documents'])} documentos, {len(entry['errors'])} erros")
+            with register_lock:
+                if existing_entry:
+                    register.remove(existing_entry)
+                register.append(entry)
+                register_map[str(answer_path)] = entry
+                save_register(register)
+            logger.info("%d documentos, %d erros", len(entry["documents"]), len(entry["errors"]))
         else:
-            print(f"  ERRO: Nenhum documento baixado")
+            logger.warning("Nenhum documento baixado")
             skipped_answers.append(str(answer_path))
             continue
 
     if skipped_answers:
-        print(f"\n{len(skipped_answers)} respostas ignoradas (sem documentos)")
+        logger.warning("%d respostas ignoradas (sem documentos)", len(skipped_answers))
 
 
 if __name__ == "__main__":

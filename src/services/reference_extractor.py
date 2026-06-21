@@ -1,8 +1,24 @@
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Union
+from tqdm import tqdm
+from ..logging_config import tqdm_logging
 from .llm_service import LLMService
+
+import pymupdf4llm
+import docx
+
+try:
+    import tiktoken
+    _enc = tiktoken.get_encoding("cl100k_base")
+except ImportError:
+    _enc = None
+
+logger = logging.getLogger(__name__)
+
+SUPPORTED_EXTENSIONS = {".md", ".markdown", ".pdf", ".docx"}
 
 
 class ReferenceExtractor:
@@ -80,6 +96,8 @@ Extrair TODAS as referências presentes no texto, incluindo:
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
     def _estimate_tokens(self, text: str) -> int:
+        if _enc is not None:
+            return len(_enc.encode(text))
         return len(text) // 4
 
     def _split_into_chunks(self, text: str) -> List[str]:
@@ -104,6 +122,17 @@ Extrair TODAS as referências presentes no texto, incluindo:
 
         return chunks
 
+    @staticmethod
+    def _normalize_ref_key(url: str) -> str:
+        """Normaliza URL para dedup (DOI → URL canônica, case-insensitive)."""
+        url = url.strip().rstrip("/")
+        if "doi.org" in url:
+            doi = url.split("doi.org/", 1)[-1]
+            return f"doi:{doi.lower()}"
+        if url.startswith("10."):
+            return f"doi:{url.lower()}"
+        return url.lower()
+
     def _extract_references(self, chunk: str) -> List[Dict[str, Any]]:
         prompt = self.DEFAULT_PROMPT.format(chunk=chunk)
         response = self._llm_service.complete(prompt)
@@ -113,34 +142,72 @@ Extrair TODAS as referências presentes no texto, incluindo:
             response = response.replace('```', '')
             return json.loads(response)
         except json.JSONDecodeError:
-            print('Ao extrair as referências do Chunk atual o modelo não respondeu em JSON.')
+            logger.warning("Ao extrair as referências do Chunk atual o modelo não respondeu em JSON.")
             return []
 
-    def extract_from_markdown(self, file_path: Union[str, Path]) -> str:
+    def _read_content(self, path: Path) -> str:
+        """Extrai texto de um arquivo conforme sua extensão."""
+        suffix = path.suffix.lower()
+
+        if suffix in (".md", ".markdown"):
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+
+        if suffix == ".pdf":
+            markdown = pymupdf4llm.to_markdown(str(path))
+            if markdown is None:
+                raise ValueError(f"Não foi possível converter o PDF: {path}")
+            return markdown
+
+        if suffix == ".docx":
+            doc = docx.Document(str(path))
+            return "\n\n".join(para.text for para in doc.paragraphs if para.text.strip())
+
+        raise ValueError(f"Formato não suportado: {suffix}")
+
+    def extract_references(self, file_path: Union[str, Path]) -> str:
+        """Extrai referências de um arquivo (md, pdf, docx)."""
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"Arquivo não encontrado: {path}")
 
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
+        suffix = path.suffix.lower()
+        if suffix not in SUPPORTED_EXTENSIONS:
+            raise ValueError(f"Formato não suportado: {suffix}. Use: {', '.join(sorted(SUPPORTED_EXTENSIONS))}")
+
+        logger.info("Lendo conteúdo de: %s", path.name)
+        content = self._read_content(path)
+
+        if not content or not content.strip():
+            raise ValueError(f"Arquivo vazio ou sem conteúdo extraível: {path}")
 
         final_file_json = {
-            'answer': file_path,
+            'answer': str(file_path),
             'references': []
         }
         chunks = self._split_into_chunks(content)
         all_references = []
+        seen_keys: set = set()
         global_id = 1
         output_file: Path = Path("")
 
-        for i, chunk in enumerate(chunks):
-            print(f"Processando chunk {i + 1}/{len(chunks)}...")
-            references = self._extract_references(chunk)
+        with tqdm_logging():
+            for i, chunk in enumerate(tqdm(chunks, desc="Extraindo referências", unit="chunk")):
+                logger.info("Processando chunk %d/%d...", i + 1, len(chunks))
+                references = self._extract_references(chunk)
 
-            for ref in references:
-                ref["id"] = global_id
-                global_id += 1
-                all_references.append(ref)
+                for ref in references:
+                    url = ref.get("url", "").strip()
+                    if not url:
+                        continue
+                    key = self._normalize_ref_key(url)
+                    if key in seen_keys:
+                        logger.debug("Referência duplicada ignorada: %s", url)
+                        continue
+                    seen_keys.add(key)
+                    ref["id"] = global_id
+                    global_id += 1
+                    all_references.append(ref)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = self._output_dir / f"references_lmStudio_{timestamp}.json"
@@ -149,6 +216,10 @@ Extrair TODAS as referências presentes no texto, incluindo:
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(final_file_json, f, ensure_ascii=False, indent=2)
 
-        print(f"Referências salvas em: {output_file}")
+        logger.info("Referências salvas em: %s", output_file)
 
         return str(output_file)
+
+    def extract_from_markdown(self, file_path: Union[str, Path]) -> str:
+        """Alias para extract_references (compatibilidade retroativa)."""
+        return self.extract_references(file_path)

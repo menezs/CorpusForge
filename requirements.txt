@@ -7,3 +7,6 @@ pymupdf4llm
 langchain-ollama
 langchain-openai
 langchain-core
+tiktoken
+tqdm
+python-docx

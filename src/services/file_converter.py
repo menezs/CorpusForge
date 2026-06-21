@@ -1,5 +1,8 @@
+import logging
 import time
 import tempfile
+from urllib.parse import urlparse
+
 import trafilatura
 import requests
 import cloudscraper
@@ -8,6 +11,10 @@ from typing import Optional, Union, Tuple
 
 import pymupdf4llm
 
+logger = logging.getLogger(__name__)
+
+ALLOWED_SCHEMES = {"http", "https"}
+
 _BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -15,6 +22,18 @@ _BROWSER_HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     )
 }
+
+
+def validate_url(url: str) -> bool:
+    """Retorna True se a URL é válida para download (http/https com netloc)."""
+    if not url or not isinstance(url, str):
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme not in ALLOWED_SCHEMES:
+        return False
+    if not parsed.netloc:
+        return False
+    return True
 
 
 class FileConverter:
@@ -33,14 +52,14 @@ class FileConverter:
                 if r.status_code == 404:
                     raise ValueError(f"Página não encontrada (404): {url}")
                 if r.status_code == 403:
-                    print(f"    403 com requests, tentando cloudscraper...")
+                    logger.warning("403 com requests, tentando cloudscraper...")
                     scraper = cloudscraper.create_scraper()
                     r = scraper.get(url, timeout=30)
                     content_type = r.headers.get("content-type", "")
                     if r.status_code == 404:
                         raise ValueError(f"Página não encontrada (404): {url}")
                     if r.status_code == 403:
-                        print(f"    403 com cloudscraper, tentando Playwright...")
+                        logger.warning("403 com cloudscraper, tentando Playwright...")
                         playwright_content = self._playwright_extract(url)
                         if playwright_content is not None:
                             return playwright_content, "text/html"
@@ -48,7 +67,7 @@ class FileConverter:
                     r.raise_for_status()
                 elif r.status_code == 429:
                     retry_after = int(r.headers.get("Retry-After", 60))
-                    print(f"    Rate limit (429), aguardando {retry_after}s...")
+                    logger.warning("Rate limit (429), aguardando %ds...", retry_after)
                     time.sleep(retry_after)
                     continue
                 else:
@@ -67,8 +86,12 @@ class FileConverter:
                 last_exc = e
                 if attempt < retries:
                     wait = backoff * (2 ** attempt)
-                    print(f"    Tentativa {attempt + 1} falhou, retry em {wait}s: {e}")
+                    logger.warning("Tentativa %d falhou, retry em %.1fs: %s", attempt + 1, wait, e)
                     time.sleep(wait)
+            except (requests.exceptions.MissingSchema,
+                    requests.exceptions.InvalidURL,
+                    requests.exceptions.InvalidSchema) as e:
+                raise ValueError(f"URL inválida: {url} - {e}")
 
         raise ValueError(f"Não foi possível acessar a URL após {retries + 1} tentativas: {url} - {last_exc}")
 
@@ -78,7 +101,7 @@ class FileConverter:
         except ImportError:
             return None
 
-        print(f"    Fallback Playwright: {url}")
+        logger.info("Fallback Playwright: %s", url)
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
@@ -90,7 +113,7 @@ class FileConverter:
             markdown = trafilatura.extract(html, output_format="markdown")
             return markdown
         except Exception as e:
-            print(f"    Playwright falhou: {type(e).__name__}: {e}")
+            logger.error("Playwright falhou: %s: %s", type(e).__name__, e)
             return None
 
     def convert(
@@ -100,6 +123,8 @@ class FileConverter:
         url: Optional[str] = None,
     ) -> str:
         if url is not None:
+            if not validate_url(url):
+                raise ValueError(f"URL inválida ou não suportada: {url}")
             return self._from_url(url, output_path)
 
         if input_path is None:
@@ -135,9 +160,11 @@ class FileConverter:
 
         if url.endswith(".pdf"):
             file_name = url.split('/')[-1].replace('.pdf', '')
-            path_to_donwload = Path(output_file.parts[0]) / f'{file_name}.pdf'
-            self._download_pdf(url=url, output_path=path_to_donwload)
-            self._from_file(path_to_donwload, output_file)
+            if not file_name:
+                file_name = "downloaded"
+            path_to_download = output_file.parent / f'{file_name}.pdf'
+            self._download_pdf(url=url, output_path=path_to_download)
+            self._from_file(path_to_download, output_file)
             return str(output_file)
 
         content, content_type = self._fetch_html(url)
@@ -162,7 +189,7 @@ class FileConverter:
             f.write(markdown)
 
         return str(output_file)
-    
+
     def _download_pdf(self, url: str, output_path: Union[str, Path]):
         r = requests.get(url, headers=_BROWSER_HEADERS, stream=True, timeout=30)
         r.raise_for_status()

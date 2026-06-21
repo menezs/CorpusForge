@@ -2,7 +2,7 @@
 
 Ferramenta para download e conversão de referências bibliográficas extraídas de respostas de LLMs.
 
-O script extrai URLs de um arquivo markdown de resposta, baixa o conteúdo de cada referência e converte para markdown, salvando o resultado em uma pasta de documentos.
+O script extrai URLs de um arquivo de resposta (markdown, PDF ou DOCX), baixa o conteúdo de cada referência e converte para markdown, salvando o resultado em uma pasta de documentos.
 
 ## Pré-requisitos
 
@@ -35,17 +35,34 @@ cp .env.example .env
 ## Uso
 
 ```bash
-# Processar um ou mais arquivos de resposta
+# Processar arquivo markdown
 python main.py answers/meu_arquivo.md
 
-# Processar múltiplos arquivos
-python main.py answers/arquivo1.md answers/arquivo2.md
+# Processar arquivo PDF
+python main.py answers/artigo.pdf
+
+# Processar arquivo DOCX
+python main.py answers/relatorio.docx
+
+# Processar múltiplos arquivos de diferentes formatos
+python main.py answers/resposta.md answers/artigo.pdf answers/relatorio.docx
 
 # Reprocessar apenas URLs que falharam anteriormente
 python main.py --retry-errors answers/meu_arquivo.md
 
+# Controlar paralelismo dos downloads (padrão: 4 threads)
+python main.py --max-workers 8 answers/meu_arquivo.md
+
 # Especificar arquivo de registro customizado
 python main.py --register ./register/meu_registro.json answers/meu_arquivo.md
+```
+
+### Barra de Progresso
+
+Durante o download das referências, uma barra de progresso é exibida:
+
+```
+Baixando referências: 100%|██████████| 10/10 [00:31<00:00,  3.12s/ref]
 ```
 
 ## Variáveis de Ambiente
@@ -53,7 +70,7 @@ python main.py --register ./register/meu_registro.json answers/meu_arquivo.md
 | Variável | Padrão | Descrição |
 |----------|--------|-----------|
 | `LLM_BASE_URL` | `http://localhost:1234/v1/` | URL do servidor LLM |
-| `LLM_MODEL` | `google/gemma-4-e4b` | Modelo a ser utilizado |
+| `LLM_MODEL` | `openai/gpt-oss-20b` | Modelo a ser utilizado |
 | `REGISTER_FILE` | `./register/register.json` | Caminho do arquivo de registro |
 
 ## Estrutura do Projeto
@@ -62,6 +79,7 @@ python main.py --register ./register/meu_registro.json answers/meu_arquivo.md
 CorpusForge/
 ├── main.py                         # Ponto de entrada
 ├── src/
+│   ├── logging_config.py           # Configuração de logging
 │   └── services/
 │       ├── file_converter.py       # Download e conversão de URLs
 │       ├── llm_service.py          # Serviço de LLM (OpenAI/Ollama)
@@ -72,11 +90,21 @@ CorpusForge/
 └── register/                       # Registro de processamento
 ```
 
+## Formatos Suportados
+
+| Formato | Extensões | Descrição |
+|---------|-----------|-----------|
+| Markdown | `.md`, `.markdown` | Leitura direta |
+| PDF | `.pdf` | Conversão via PyMuPDF4LLM |
+| Word | `.docx` | Extração via python-docx |
+
+> **Nota:** Arquivos `.doc` (formato antigo) não são suportados. Converta para `.docx` antes de usar.
+
 ## Formato dos Arquivos
 
 ### Arquivo de Resposta (entrada)
 
-Markdown com lista de referências numeradas e URLs:
+Markdown, PDF ou DOCX com lista de referências numeradas e URLs:
 
 ```markdown
 [1] Título do Documento
@@ -106,3 +134,14 @@ JSON com status do download de cada referência:
   }
 ]
 ```
+
+## Funcionalidades
+
+- **Múltiplos formatos de entrada:** Markdown, PDF e DOCX
+- **Download paralelo:** Threads configuráveis via `--max-workers`
+- **Barra de progresso:** Acompanhamento visual durante downloads
+- **Retry seletivo:** Reprocessamento de erros recuperáveis (429, timeout, 403)
+- **Deduplicação automática:** Referências duplicadas entre chunks são ignoradas
+- **Validação de URLs:** Rejeita schemes inválidos (file://, javascript:, etc.)
+- **Logging estruturado:** Mensagens com timestamp e nível de severidade
+- **Registro atômico:** Escrita segura do register (write-then-rename)
