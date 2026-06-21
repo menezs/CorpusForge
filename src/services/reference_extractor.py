@@ -50,6 +50,13 @@ Extrair TODAS as referências presentes no texto, incluindo:
    * Preservando o texto original (sem cortes ou resumos)
 5. Considere citações inline dentro de frases, parênteses ou notas.
 6. Ignore referências incompletas que não possam ser convertidas em URL válida.
+7. URLs no texto podem aparecer com espaços ou quebras de linha (extração de PDF).
+   Nesses casos:
+   - Mantenha o texto EXATAMENTE como aparece no parágrafo
+   - NÃO substitua espaços por %20
+   - NÃO remova espaços
+   - NÃO remova hífens (-)
+   - O tratamento de espaços em URLs será feito em etapa posterior
 
 ---
 

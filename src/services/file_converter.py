@@ -1,6 +1,7 @@
 import logging
 import time
 import tempfile
+import urllib.parse
 from urllib.parse import urlparse
 
 import urllib3
@@ -40,8 +41,38 @@ def validate_url(url: str) -> bool:
 
 
 class FileConverter:
+    def _try_url_variations(self, url: str) -> str:
+        """Se URL tem espaço ou %20, testa variações (hífen / remove espaço) no servidor."""
+        if '%20' in url:
+            url = urllib.parse.unquote(url)
+
+        if ' ' not in url:
+            return url
+
+        candidates = [
+            url.replace(' ', '-'),
+            url.replace(' ', ''),
+        ]
+
+        for candidate in candidates:
+            try:
+                r = requests.head(
+                    candidate,
+                    headers=_BROWSER_HEADERS,
+                    timeout=10,
+                    allow_redirects=True,
+                )
+                if r.status_code < 400:
+                    logger.info("URL corrigida automaticamente: %s → %s", url, candidate)
+                    return candidate
+            except requests.RequestException:
+                continue
+
+        return url
+
     def _fetch_html(self, url: str, retries: int = 2, backoff: float = 2.0) -> Tuple[str, str]:
         """Retorna (conteudo, content_type)."""
+        url = self._try_url_variations(url)
         last_exc = None
         for attempt in range(retries + 1):
             try:
@@ -108,26 +139,30 @@ class FileConverter:
 
         raise ValueError(f"Não foi possível acessar a URL após {retries + 1} tentativas: {url} - {last_exc}")
 
-    def _playwright_extract(self, url: str) -> Optional[str]:
+    def _playwright_extract(self, url: str, retries: int = 2) -> Optional[str]:
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
             return None
 
         logger.info("Fallback Playwright: %s", url)
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.set_extra_http_headers(_BROWSER_HEADERS)
-                page.goto(url, wait_until="networkidle", timeout=30000)
-                html = page.content()
-                browser.close()
-            markdown = trafilatura.extract(html, output_format="markdown")
-            return markdown
-        except Exception as e:
-            logger.error("Playwright falhou: %s: %s", type(e).__name__, e)
-            return None
+        for attempt in range(retries + 1):
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    page = browser.new_page()
+                    page.set_extra_http_headers(_BROWSER_HEADERS)
+                    page.goto(url, wait_until="networkidle", timeout=60000)
+                    html = page.content()
+                    browser.close()
+                markdown = trafilatura.extract(html, output_format="markdown")
+                if markdown:
+                    return markdown
+                logger.warning("trafilatura retornou None após Playwright (tentativa %d)", attempt + 1)
+            except Exception as e:
+                logger.warning("Playwright falhou (tentativa %d/%d): %s: %s",
+                               attempt + 1, retries + 1, type(e).__name__, e)
+        return None
 
     def convert(
         self,
@@ -166,6 +201,8 @@ class FileConverter:
         return str(output_file)
 
     def _from_url(self, url: str, output_path: Optional[Union[str, Path]] = None) -> str:
+        url = self._try_url_variations(url)
+
         if output_path is None:
             raise ValueError("output_path é obrigatório quando usando url")
 
@@ -205,6 +242,7 @@ class FileConverter:
 
     def _download_pdf(self, url: str, output_path: Union[str, Path], retries: int = 2, backoff: float = 2.0):
         """Baixa PDF com retry, timeout adaptativo e fallback Playwright."""
+        url = self._try_url_variations(url)
         timeout = (10, 120)  # (connect_timeout, read_timeout)
         last_exc = None
 
