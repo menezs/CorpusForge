@@ -57,6 +57,11 @@ Extrair TODAS as referências presentes no texto, incluindo:
    - NÃO remova espaços
    - NÃO remova hífens (-)
    - O tratamento de espaços em URLs será feito em etapa posterior
+8. Extraia APENAS a URL completa (começando com http:// ou https://).
+   NÃO inclua numeração, título, fonte ou descrição antes da URL.
+   Se o texto contém "Título - Fonte, https://exemplo.com", extraia apenas "https://exemplo.com"
+   Se o texto contém "htps://", corrija para "https://"
+   Nunca quebre uma URL em múltiplas linhas
 
 ---
 

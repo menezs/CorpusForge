@@ -50,6 +50,9 @@ python main.py answers/resposta.md answers/artigo.pdf answers/relatorio.docx
 # Reprocessar apenas URLs que falharam anteriormente
 python main.py --retry-errors answers/meu_arquivo.md
 
+# Usar JSON de referências pré-extraído (pula extração LLM)
+python main.py --references-json references/references_lmStudio_20260621_164208.json
+
 # Controlar paralelismo dos downloads (padrão: 4 threads)
 python main.py --max-workers 8 answers/meu_arquivo.md
 
@@ -102,6 +105,30 @@ CorpusForge/
 
 ## Formato dos Arquivos
 
+### JSON de Referências (pré-extraído)
+
+JSON com referências extraídas anteriormente, usado com `--references-json`:
+
+```json
+{
+  "answer": "answers/arquivo_original.pdf",
+  "references": [
+    {
+      "id": 1,
+      "url": "https://exemplo.com/documento",
+      "paragraph": "Parágrafo completo onde a referência aparece."
+    },
+    {
+      "id": 2,
+      "url": "https://exemplo.com/outro",
+      "paragraph": "Outro parágrafo com referência."
+    }
+  ]
+}
+```
+
+> **Nota:** O campo `answer` é obrigatório para associar o registro ao arquivo original.
+
 ### Arquivo de Resposta (entrada)
 
 Markdown, PDF ou DOCX com lista de referências numeradas e URLs:
@@ -141,6 +168,7 @@ JSON com status do download de cada referência:
 - **Download paralelo:** Threads configuráveis via `--max-workers`
 - **Barra de progresso:** Acompanhamento visual durante downloads
 - **Retry seletivo:** Reprocessamento de erros recuperáveis (429, timeout, 403)
+- **Referências pré-extraídas:** Pular extração LLM com `--references-json`
 - **Deduplicação automática:** Referências duplicadas entre chunks são ignoradas
 - **Validação de URLs:** Rejeita schemes inválidos (file://, javascript:, etc.)
 - **Logging estruturado:** Mensagens com timestamp e nível de severidade

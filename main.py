@@ -58,17 +58,17 @@ def download_references(
     llm: LLMService,
     existing_entry: dict = None,
     max_workers: int = 4,
+    references: list = None,
 ) -> dict:
-    extractor = ReferenceExtractor(llm_service=llm)
     converter = FileConverter()
 
-    logger.info("Processando: %s", answer_path)
-
-    result_path = extractor.extract_references(str(answer_path))
-    with open(result_path, "r", encoding="utf-8") as f:
-        result_json = json.load(f)
-
-    references = result_json.get("references", [])
+    if references is None:
+        extractor = ReferenceExtractor(llm_service=llm)
+        logger.info("Processando: %s", answer_path)
+        result_path = extractor.extract_references(str(answer_path))
+        with open(result_path, "r", encoding="utf-8") as f:
+            result_json = json.load(f)
+        references = result_json.get("references", [])
 
     already_downloaded = set()
     already_errored_urls = set()
@@ -239,16 +239,44 @@ def main() -> None:
         "--max-workers", type=int, default=4,
         help="Número máximo de downloads paralelos (padrão: 4)",
     )
+    parser.add_argument(
+        "--references-json", type=str, default=None,
+        help="Caminho para JSON de referências pré-extraído (pula extração LLM)",
+    )
     args = parser.parse_args()
 
     global REGISTER_FILE
     if args.register:
         REGISTER_FILE = Path(args.register)
 
+    if args.retry_errors and args.references_json:
+        logger.error("--retry-errors e --references-json são mutuamente exclusivos")
+        sys.exit(1)
+
+    refs_data = None
+    if args.references_json:
+        refs_json_path = Path(args.references_json)
+        if not refs_json_path.exists():
+            logger.error("Arquivo de referências não encontrado: %s", refs_json_path)
+            sys.exit(1)
+        try:
+            with open(refs_json_path, "r", encoding="utf-8") as f:
+                refs_data = json.load(f)
+        except json.JSONDecodeError as e:
+            logger.error("JSON inválido: %s - %s", refs_json_path, e)
+            sys.exit(1)
+        if "references" not in refs_data:
+            logger.error("JSON não contém chave 'references': %s", refs_json_path)
+            sys.exit(1)
+        if "answer" not in refs_data:
+            logger.error("JSON não contém chave 'answer': %s", refs_json_path)
+            sys.exit(1)
+
     answer_files = args.answer_files
-    if not answer_files:
+    if not answer_files and not refs_data:
         logger.error("Nenhum arquivo de resposta informado.")
         logger.info("Uso: python main.py <arquivo.md|pdf|docx> [arquivo2.md ...]")
+        logger.info("     python main.py --references-json <referencias.json>")
         logger.info("     python main.py --retry-errors <arquivo.md>")
         sys.exit(1)
 
@@ -257,34 +285,54 @@ def main() -> None:
     register_map = {entry["answer"]: entry for entry in register}
     skipped_answers = []
 
-    for answer_path in answer_files:
-        existing_entry = register_map.get(str(answer_path))
-
-        if args.retry_errors:
-            if not existing_entry:
-                logger.warning("Sem registro anterior, ignorando: %s", answer_path)
-                continue
-            entry = download_errors_only(
-                Path(answer_path), existing_entry, max_workers=args.max_workers,
-            )
-        else:
-            logger.info("Fazendo download das referências: %s", answer_path)
-            entry = download_references(
-                Path(answer_path), llm, existing_entry, max_workers=args.max_workers,
-            )
-
+    if refs_data:
+        answer_path_key = refs_data["answer"]
+        existing_entry = register_map.get(answer_path_key)
+        entry = download_references(
+            Path(answer_path_key), llm, existing_entry,
+            max_workers=args.max_workers,
+            references=refs_data["references"],
+        )
         if entry["documents"]:
             with register_lock:
                 if existing_entry:
                     register.remove(existing_entry)
                 register.append(entry)
-                register_map[str(answer_path)] = entry
+                register_map[answer_path_key] = entry
                 save_register(register)
             logger.info("%d documentos, %d erros", len(entry["documents"]), len(entry["errors"]))
         else:
             logger.warning("Nenhum documento baixado")
-            skipped_answers.append(str(answer_path))
-            continue
+            skipped_answers.append(answer_path_key)
+    else:
+        for answer_path in answer_files:
+            existing_entry = register_map.get(str(answer_path))
+
+            if args.retry_errors:
+                if not existing_entry:
+                    logger.warning("Sem registro anterior, ignorando: %s", answer_path)
+                    continue
+                entry = download_errors_only(
+                    Path(answer_path), existing_entry, max_workers=args.max_workers,
+                )
+            else:
+                logger.info("Fazendo download das referências: %s", answer_path)
+                entry = download_references(
+                    Path(answer_path), llm, existing_entry, max_workers=args.max_workers,
+                )
+
+            if entry["documents"]:
+                with register_lock:
+                    if existing_entry:
+                        register.remove(existing_entry)
+                    register.append(entry)
+                    register_map[str(answer_path)] = entry
+                    save_register(register)
+                logger.info("%d documentos, %d erros", len(entry["documents"]), len(entry["errors"]))
+            else:
+                logger.warning("Nenhum documento baixado")
+                skipped_answers.append(str(answer_path))
+                continue
 
     if skipped_answers:
         logger.warning("%d respostas ignoradas (sem documentos)", len(skipped_answers))
